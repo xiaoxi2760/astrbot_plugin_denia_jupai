@@ -1,0 +1,16 @@
+{
+ "name": "西格莉卡举牌5",
+ "mode": "fullframe",
+ "file": "frame.gif",
+ "calibration": "calibration.json",
+ "font": null,
+ "min_font_size": 10.0,
+ "max_font_size": 44.0,
+ "text_box_scale": [
+  0.9,
+  0.66
+ ],
+ "default_text": null,
+ "default_color": "#ffae2e",
+ "image": false
+}

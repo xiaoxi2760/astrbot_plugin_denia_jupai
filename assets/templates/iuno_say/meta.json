@@ -1,0 +1,20 @@
+{
+ "name": "尤诺说",
+ "mode": "static",
+ "file": "frame.jpg",
+ "text_size": [
+  198,
+  41
+ ],
+ "pos": [
+  100.0,
+  21.5
+ ],
+ "angle": 0.0,
+ "min_font_size": 5.0,
+ "max_font_size": 80.0,
+ "default_text": "月亮游离世间",
+ "default_color": "#000000",
+ "stroke_width": 0,
+ "font": null
+}

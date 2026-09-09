@@ -1,0 +1,20 @@
+{
+ "name": "西西说",
+ "mode": "static",
+ "file": "frame.jpg",
+ "text_size": [
+  1140,
+  300
+ ],
+ "pos": [
+  568.5,
+  181.5
+ ],
+ "angle": -1.2,
+ "min_font_size": 20.0,
+ "max_font_size": 208.0,
+ "default_text": "再发找人弄你",
+ "default_color": "#000000",
+ "stroke_width": 6,
+ "font": "xixi_font.ttf"
+}

@@ -1,0 +1,14 @@
+{
+  "default_text": {
+    "type": "string",
+    "default": "生日快乐！",
+    "description": "默认文字",
+    "hint": "指令后未跟文字且未引用图片时使用（引用图片生成时不加文字，纯图上牌）"
+  },
+  "default_color": {
+    "type": "string",
+    "default": "粉",
+    "description": "默认字色",
+    "hint": "黑/粉/红/橙/黄/绿/深绿/青/蓝/深蓝/紫/金 或 R,G,B；指令内可用 -c 颜色 临时覆盖"
+  }
+}
