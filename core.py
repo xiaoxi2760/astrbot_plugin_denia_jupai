@@ -97,7 +97,8 @@ def _scan_template_specs() -> dict[str, dict]:
 
 LINE_H = 1.18
 PAD = 12            # 文字安全区 = 牌面四边形内缩
-SS = 8              # 文字渲染超采样(8x 渲染 -> LANCZOS 精缩 -> 逐帧纯旋转)
+SS = 1              # 文字渲染超采样（1=关闭。表情包 300x300 无需高清管线，
+                    # 开 8x 时西西说大画布单次渲染内存峰值 2.9GB，纯属浪费）(8x 渲染 -> LANCZOS 精缩 -> 逐帧纯旋转)
                     # 大画布自动降档: 超采样像素数超 _SS_BUDGET 时按比例减小 SS(下限 2)
 _SS_BUDGET = 12_000_000   # 超采样画布像素预算(约 12MP, float32 下峰值内存 <1GB)
 MIN_SIZE = 12       # 可读下限,仍放不下则 TextTooLong
@@ -665,22 +666,30 @@ def _fit(text: str, iw: int, ih: int, font_path: Path = FONT_PATH):
 
 def _fit_range(text: str, iw: int, ih: int, font_path: Path,
                max_size: float, min_size: float):
-    """xixi 举牌的字号搜索(移植 Rust fit_text):从 max_size 往下降到 min_size,
-    放不下则退回 min_size 单字换行;仍放不下抛 TextTooLong。返回 (font, lines, lh)。"""
+    """字号搜索（举牌 _fit 同款思路的内存安全版）：从 max_size 按几何步进往下
+    找能放进文字区的最大字号，到 min_size 仍放不下抛 TextTooLong。
+
+    探测字体用临时 truetype 实例（不进 _font_cache）：PIL 给每个字号实例缓存
+    整套字形位图（大字号几十 MB），逐号探测且入全局缓存会把内存撑到数百 MB。
+    """
     probe = ImageDraw.Draw(Image.new("L", (1, 1)))
-    for size in range(int(max_size), int(min_size) - 1, -1):
-        font = _get_font(size, font_path)
-        lines = _wrap(text, font, iw)
+    min_i = max(int(min_size), 1)
+    size = int(max_size)
+    while size >= min_i:
+        font_try = ImageFont.truetype(str(font_path), size)
+        lines = _wrap(text, font_try, iw)
         lh = int(size * LINE_H)
         if (lines and lh * len(lines) <= ih
-                and max(sum(_tok_width(t, font, probe) for t in l) for l in lines) <= iw):
-            return font, lines, lh
-    font = _get_font(int(min_size), font_path)
-    lines = _wrap(text, font, iw)
-    lh = int(min_size * LINE_H)
+                and max(sum(_tok_width(t, font_try, probe) for t in l) for l in lines) <= iw):
+            return _get_font(size, font_path), lines, lh
+        size = size * 88 // 100          # 几何步进：208->min 约 12 次探测
+    size = min_i
+    font_try = ImageFont.truetype(str(font_path), size)
+    lines = _wrap(text, font_try, iw)
+    lh = int(size * LINE_H)
     if not lines or lh * len(lines) > ih:
-        raise TextTooLong(f"文字太长啦,牌子上写不下:{text!r}")
-    return font, lines, lh
+        raise TextTooLong(f"文字太长啦，牌子上写不下：{text!r}")
+    return _get_font(size, font_path), lines, lh
 
 
 def _bottom_angle(rect) -> float:
