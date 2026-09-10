@@ -29,7 +29,7 @@ from .core import (JupaiError, TextTooLong, load_image, parse_color, render,
                     render_banned_list_card, split_banned_tokens, banned_hit)
 
 PLUGIN_NAME = "astrbot_plugin_denia_jupai"
-VERSION = "1.9.4"
+VERSION = "1.9.5"
 
 # 角色注册表：新增角色 = 在 ROLES 加一条（或写 roles.json），并准备对应素材 + core.TEMPLATES 的 key。
 # 编号含义固定：1眨眼 2红温 3开心 4悲伤 5期待 6哭哭（动作相同，最多牌子颜色/角色不同；
