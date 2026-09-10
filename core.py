@@ -494,6 +494,29 @@ def template_default_color(key: str) -> str | None:
     return spec.get("default_color") if spec else None
 
 
+def split_banned_tokens(cfg: str) -> list[str]:
+    """把违禁词配置文本拆成词列表：支持换行/逗号（全半角）/分号/空白分隔，去重保序。"""
+    words: list[str] = []
+    seen: set[str] = set()
+    for token in re.split(r"[\n\r,，;；\s]+", str(cfg or "")):
+        token = token.strip()
+        if token and token.lower() not in seen:
+            seen.add(token.lower())
+            words.append(token)
+    return words
+
+
+def banned_hit(text: str, words: list[str]) -> str | None:
+    """正文是否命中违禁词（忽略大小写与词内空白）；返回命中的词，未命中 None。"""
+    body = re.sub(r"\s+", "", str(text or "")).lower()
+    if not body:
+        return None
+    for w in words:
+        if re.sub(r"\s+", "", str(w)).lower() in body:
+            return w
+    return None
+
+
 def _template_spec(key: str) -> dict:
     try:
         return _template_specs[key]
@@ -1243,6 +1266,13 @@ def render_help_card(roles: dict, static_cmds: dict | None = None,
         (F_BODY, "或 6 位色号：#e74c3c", C_MUT, 0),
     ]
     add_lines("颜色", color_lines)
+
+    # 违禁词管理
+    ban_lines = [
+        (F_BODY, "添加违禁词 词1 词2 … ｜ 删除违禁词 词 ｜ 违禁词列表", C_INK, 0),
+        (F_BODY, "群管理员和 bot 主人可用；命中违禁词的文字会被拒绝生成，面板设置里也可查看调整", C_MUT, 0),
+    ]
+    add_lines("违禁词管理", ban_lines)
 
     # 塞图
     img_lines = [

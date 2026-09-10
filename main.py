@@ -24,10 +24,12 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image as CompImage, Reply as CompReply
 from astrbot.api.star import Context, Star, StarTools, register
 
-from .core import JupaiError, TextTooLong, load_image, parse_color, render, split_color_tail, template_default_color, render_help_card
+from .core import (JupaiError, TextTooLong, load_image, parse_color, render,
+                    split_color_tail, template_default_color, render_help_card,
+                    split_banned_tokens, banned_hit)
 
 PLUGIN_NAME = "astrbot_plugin_denia_jupai"
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 
 # 角色注册表：新增角色 = 在 ROLES 加一条（或写 roles.json），并准备对应素材 + core.TEMPLATES 的 key。
 # 编号含义固定：1眨眼 2红温 3开心 4悲伤 5期待 6哭哭（动作相同，最多牌子颜色/角色不同；
@@ -77,6 +79,14 @@ STATIC_CMDS = {
 }
 _STATIC_PATTERN = r"^(" + "|".join(re.escape(c) for c in STATIC_CMDS) + r")(?:\s+(.*))?$"
 _STATIC_RE = re.compile(_STATIC_PATTERN)
+
+# 违禁词管理：添加违禁词 / 删除违禁词 / 违禁词列表（群管理员和 bot 主人可用）
+BANNED_ADD_PATTERN = r"^添加违禁词(?:\s+(.+))?$"
+BANNED_DEL_PATTERN = r"^删除违禁词(?:\s+(.+))?$"
+BANNED_LIST_PATTERN = r"^违禁词列表$"
+_BANNED_ADD_RE = re.compile(BANNED_ADD_PATTERN)
+_BANNED_DEL_RE = re.compile(BANNED_DEL_PATTERN)
+_BANNED_LIST_RE = re.compile(BANNED_LIST_PATTERN)
 
 
 def _load_roles_config() -> dict:
@@ -181,6 +191,91 @@ class JupaiPlugin(Star):
             except OSError:
                 pass
 
+    # ---------------- 违禁词 ----------------
+    def _banned_store_path(self) -> Path:
+        return self._get_data_dir() / "banned_words.json"
+
+    def _get_data_dir(self) -> Path:
+        try:
+            base = Path(StarTools.get_data_dir(PLUGIN_NAME))
+        except Exception:
+            base = Path(tempfile.gettempdir()) / PLUGIN_NAME
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+
+    def _load_banned(self) -> list[str]:
+        """生效违禁词 = 面板配置 banned_words + 指令维护的持久化列表（合并去重）。"""
+        words: list[str] = []
+        cfg = self.config.get("banned_words", "")
+        if isinstance(cfg, list):
+            cfg = "\n".join(str(x) for x in cfg)
+        words.extend(split_banned_tokens(cfg))
+        try:
+            data = json.loads(self._banned_store_path().read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                words.extend(str(x) for x in data.get("words", []))
+        except (OSError, ValueError):
+            pass
+        seen: set[str] = set()
+        out: list[str] = []
+        for w in words:
+            k = w.strip().lower()
+            if w.strip() and k not in seen:
+                seen.add(k)
+                out.append(w.strip())
+        return out
+
+    def _save_banned_add(self, words: list[str]) -> int:
+        """追加到持久化列表，返回新增数。"""
+        path = self._banned_store_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {"words": []}
+        cur = [str(x) for x in data.get("words", [])]
+        known = {x.lower() for x in cur} | {x.lower() for x in self._load_banned()}
+        added = 0
+        for w in words:
+            if w.lower() not in known:
+                cur.append(w)
+                known.add(w.lower())
+                added += 1
+        path.write_text(json.dumps({"words": cur}, ensure_ascii=False, indent=1),
+                        encoding="utf-8")
+        return added
+
+    def _save_banned_del(self, words: list[str]) -> int:
+        """从持久化列表删除（面板配置里的词提示去面板删），返回删除数。"""
+        path = self._banned_store_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {"words": []}
+        cur = [str(x) for x in data.get("words", [])]
+        targets = {w.lower() for w in words}
+        kept, removed = [], []
+        for x in cur:
+            (removed if x.lower() in targets else kept).append(x)
+        path.write_text(json.dumps({"words": kept}, ensure_ascii=False, indent=1),
+                        encoding="utf-8")
+        return len(removed)
+
+    def _is_banned_admin(self, event: AstrMessageEvent) -> bool:
+        """群管理员（含群主）或 bot 主人。"""
+        sender = event.get_sender_id()
+        if str(sender) in {str(x) for x in self.config.get("admins_id", []) or []}:
+            return True
+        try:
+            if event.is_admin:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _check_banned(self, text: str) -> str | None:
+        """命中返回违禁词；未命中 None。"""
+        return banned_hit(text, self._load_banned())
+
     async def _extract_image(self, event: AstrMessageEvent) -> Path | None:
         """取消息里（含被引用消息）的第一张图片的本地路径；没有则 None。
 
@@ -265,6 +360,11 @@ class JupaiPlugin(Star):
         except ValueError as e:
             yield event.plain_result(str(e))
             return
+        if text:
+            hit = self._check_banned(text)
+            if hit:
+                yield event.plain_result(f"这句话不能写上牌子哦（含违禁词：{hit}）")
+                return
         loop = asyncio.get_running_loop()
         img = None
         if image_path is not None:
@@ -356,6 +456,70 @@ class JupaiPlugin(Star):
         async for r in self._make(event, template_key, t, c, None,
                                   template_default=True):
             yield r
+        event.stop_event()
+
+    # ---------------- 违禁词管理 ----------------
+    @filter.regex(BANNED_ADD_PATTERN)
+    async def banned_add_cmd(self, event: AstrMessageEvent):
+        """添加违禁词 词1 词2 …（群管理员 / bot 主人）"""
+        m = _BANNED_ADD_RE.match(event.get_message_str().strip())
+        if not m:
+            return
+        if not self._is_banned_admin(event):
+            yield event.plain_result("只有群管理员和 bot 主人可以管理违禁词")
+            event.stop_event()
+            return
+        words = split_banned_tokens(m.group(1) or "")
+        if not words:
+            yield event.plain_result("用法：添加违禁词 词1 词2 …（空格或逗号分隔，可一次多个）")
+            event.stop_event()
+            return
+        added = self._save_banned_add(words)
+        total = len(self._load_banned())
+        yield event.plain_result(
+            f"已添加 {added} 个违禁词（{('、'.join(words))[:80]}），当前共 {total} 个")
+        event.stop_event()
+
+    @filter.regex(BANNED_DEL_PATTERN)
+    async def banned_del_cmd(self, event: AstrMessageEvent):
+        """删除违禁词 词…（群管理员 / bot 主人；面板配置的词需去面板删）"""
+        m = _BANNED_DEL_RE.match(event.get_message_str().strip())
+        if not m:
+            return
+        if not self._is_banned_admin(event):
+            yield event.plain_result("只有群管理员和 bot 主人可以管理违禁词")
+            event.stop_event()
+            return
+        words = split_banned_tokens(m.group(1) or "")
+        if not words:
+            yield event.plain_result("用法：删除违禁词 词1 词2 …")
+            event.stop_event()
+            return
+        removed = self._save_banned_del(words)
+        cfg_words = split_banned_tokens(self.config.get("banned_words", "") or "")
+        still = [w for w in words
+                 if any(w.lower() == c.lower() for c in cfg_words)]
+        msg = f"已删除 {removed} 个违禁词"
+        if still:
+            msg += "；" + "、".join(still[:10]) + " 来自面板配置，请到 AstrBot 面板插件设置里删除"
+        yield event.plain_result(msg)
+        event.stop_event()
+
+    @filter.regex(BANNED_LIST_PATTERN)
+    async def banned_list_cmd(self, event: AstrMessageEvent):
+        """违禁词列表（群管理员 / bot 主人）"""
+        if not _BANNED_LIST_RE.match(event.get_message_str().strip()):
+            return
+        if not self._is_banned_admin(event):
+            yield event.plain_result("只有群管理员和 bot 主人可以查看违禁词列表")
+            event.stop_event()
+            return
+        words = self._load_banned()
+        if not words:
+            yield event.plain_result("违禁词列表是空的（添加：添加违禁词 词1 词2 …）")
+            event.stop_event()
+            return
+        yield event.plain_result(f"当前违禁词 {len(words)} 个：\n" + "、".join(words))
         event.stop_event()
 
     # ---------------- 帮助 ----------------
