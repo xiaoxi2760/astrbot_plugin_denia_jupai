@@ -98,6 +98,8 @@ def _scan_template_specs() -> dict[str, dict]:
 LINE_H = 1.18
 PAD = 12            # 文字安全区 = 牌面四边形内缩
 SS = 8              # 文字渲染超采样(8x 渲染 -> LANCZOS 精缩 -> 逐帧纯旋转)
+                    # 大画布自动降档: 超采样像素数超 _SS_BUDGET 时按比例减小 SS(下限 2)
+_SS_BUDGET = 12_000_000   # 超采样画布像素预算(约 12MP, float32 下峰值内存 <1GB)
 MIN_SIZE = 12       # 可读下限,仍放不下则 TextTooLong
 INK_TARGET = 26     # 原程序烘焙字实测墨高(px),长文本锚定默认字号
 INK_MAX = 40        # 字数很少时允许放大的墨高上限(1~2 字放满,平滑回落)
@@ -765,17 +767,21 @@ def _text_layer(text: str, w: int, h: int, rgb,
     stroke_width > 0 时文字加同色描边(静态模板用,emoji 不加)。"""
     if font is None:
         font, lines, lh = _fit(text, w, h, font_path)
-    mw, mh = w * SS, h * SS
-    fss = _get_font(font.size * SS, font_path)
+    # 动态超采样：大画布（如 1140x300 的西西说）按预算降 SS，防内存打爆容器
+    ss = SS
+    while ss > 2 and w * h * ss * ss > _SS_BUDGET:
+        ss -= 1
+    mw, mh = w * ss, h * ss
+    fss = _get_font(font.size * ss, font_path)
     probe = ImageDraw.Draw(Image.new("L", (1, 1)))
     ascent, descent = fss.getmetrics()
-    lhss = int(font.size * SS * LINE_H)
+    lhss = int(font.size * ss * LINE_H)
     top = (mh - lhss * len(lines)) // 2
 
     mask = Image.new("L", (mw, mh), 0)
     md = ImageDraw.Draw(mask)
     emoji_layer = Image.new("RGBA", (mw, mh), (0, 0, 0, 0))
-    px_ss = max(4, round(font.size * SS * EMOJI_H))
+    px_ss = max(4, round(font.size * ss * EMOJI_H))
 
     for k, toks in enumerate(lines):
         # 相邻文本 token 合并成段;同一段共用基线笔位(anchor="ls")保证行内自然排版
@@ -807,8 +813,8 @@ def _text_layer(text: str, w: int, h: int, rgb,
                 md.text((x, y_base), vv, font=fss, fill=255, anchor="ls")
             x += tw
 
-    a_text = np.asarray(mask).astype(float) / 255.0
-    e_full = np.asarray(emoji_layer).astype(float)
+    a_text = np.asarray(mask).astype(np.float32) / 255.0
+    e_full = np.asarray(emoji_layer).astype(np.float32)
     a_emoji = e_full[..., 3] / 255.0
     alpha = np.maximum(a_text, a_emoji)
 
@@ -828,13 +834,13 @@ def _text_layer(text: str, w: int, h: int, rgb,
         (w, h), Image.Resampling.LANCZOS)
     eam = Image.fromarray(e_full[..., 3].astype(np.uint8), "L").resize(
         (w, h), Image.Resampling.LANCZOS)
-    e_rgb = np.asarray(rgbp).astype(float)
-    e_a = np.asarray(eam).astype(float) / 255.0
+    e_rgb = np.asarray(rgbp).astype(np.float32)
+    e_a = np.asarray(eam).astype(np.float32) / 255.0
     emoji_rgb = np.where(e_a[..., None] > 0, e_rgb / np.maximum(e_a, 1e-6)[..., None], 0.0)
 
-    t_a = np.asarray(text_img).astype(float) / 255.0
+    t_a = np.asarray(text_img).astype(np.float32) / 255.0
     out_a = np.maximum(t_a, e_a)
-    out_rgb = np.where((t_a >= e_a)[..., None], np.array(rgb, dtype=float), emoji_rgb)
+    out_rgb = np.where((t_a >= e_a)[..., None], np.array(rgb, dtype=np.float32), emoji_rgb)
     return Image.fromarray(
         np.dstack([np.clip(out_rgb, 0, 255).astype(np.uint8),
                    (out_a * 255).astype(np.uint8)]), "RGBA")
