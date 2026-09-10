@@ -29,7 +29,7 @@ from .core import (JupaiError, TextTooLong, load_image, parse_color, render,
                     render_banned_list_card, split_banned_tokens, banned_hit)
 
 PLUGIN_NAME = "astrbot_plugin_denia_jupai"
-VERSION = "1.9.1"
+VERSION = "1.9.2"
 
 # 角色注册表：新增角色 = 在 ROLES 加一条（或写 roles.json），并准备对应素材 + core.TEMPLATES 的 key。
 # 编号含义固定：1眨眼 2红温 3开心 4悲伤 5期待 6哭哭（动作相同，最多牌子颜色/角色不同；
@@ -263,8 +263,13 @@ class JupaiPlugin(Star):
 
     def _is_banned_admin(self, event: AstrMessageEvent) -> bool:
         """群管理员（含群主）或 bot 主人。"""
-        sender = event.get_sender_id()
-        if str(sender) in {str(x) for x in self.config.get("admins_id", []) or []}:
+        sender = str(event.get_sender_id())
+        admins_cfg = self.config.get("admins_id", "") or ""
+        if isinstance(admins_cfg, (list, tuple)):
+            admin_ids = {str(x).strip() for x in admins_cfg}
+        else:
+            admin_ids = {x.strip() for x in re.split(r"[,，;；\s]+", str(admins_cfg))}
+        if sender in {x for x in admin_ids if x}:
             return True
         try:
             if event.is_admin:

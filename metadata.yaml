@@ -21,6 +21,6 @@ desc: |
   超长自动缩小字号，放不下会提示而不产烂图；单张生成不到 1 秒。
 
   群聊直接发即可，无需 @ 或唤醒前缀；@ 机器人和 `/` 前缀写法仍然兼容。
-version: 1.9.1
+version: 1.9.2
 author: xiaoxi2760
 repo: https://github.com/xiaoxi2760/astrbot_plugin_denia_jupai
