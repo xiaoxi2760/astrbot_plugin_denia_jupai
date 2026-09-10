@@ -1201,6 +1201,63 @@ def _help_collect(roles: dict, static_cmds: dict | None = None) -> dict:
     return data
 
 
+def render_banned_list_card(words: list[str],
+                            title: str = "违禁词列表") -> bytes:
+    """违禁词列表竖版卡片 PNG。words 为空时渲染空态。"""
+    F_TITLE = _help_font(44)
+    F_BODY = _help_font(28)
+    F_MUT = _help_font(22)
+
+    C_INK = (60, 52, 60)
+    C_HEAD = (255, 143, 187)
+    C_MUT = (128, 120, 130)
+
+    W = 860
+    M = 44
+    inner = W - M * 2
+
+    # 每词一块（序号 + 词，词超宽折行）
+    items: list[list[tuple]] = []
+    for i, w in enumerate(words, 1):
+        s = f"{i:>2}. {w}"
+        lines = []
+        while s:
+            lo, hi = 1, len(s)
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                bbox = F_BODY.getbbox(s[:mid])
+                if (bbox[2] - bbox[0]) <= inner - 8:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            lines.append(s[:lo])
+            s = s[lo:]
+        items.append(lines)
+
+    H = M + 70 + 24 + (len(items) * (44 if words else 0)) + 40
+    if not words:
+        H = M + 190
+
+    img = Image.new("RGB", (W, H), (250, 246, 248))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((16, 16, W - 16, H - 16), radius=26, fill=(255, 255, 255),
+                        outline=(240, 234, 238), width=2)
+    d.text((M, M), title, font=F_TITLE, fill=C_HEAD)
+    y = M + 70
+    d.line((M, y, W - M, y), fill=(235, 228, 232), width=2)
+    y += 24
+    if not words:
+        d.text((M, y), "还没有违禁词。添加：举牌添加违禁词 词1 词2 …", font=F_MUT, fill=C_MUT)
+    else:
+        for lines in items:
+            for k, ln in enumerate(lines):
+                d.text((M + (0 if k == 0 else 34), y), ln, font=F_BODY, fill=C_INK)
+                y += 44
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def render_help_card(roles: dict, static_cmds: dict | None = None,
                      version: str = "", plugin_title: str = "今天你想为娅娅欢呼吗") -> bytes:
     """渲染帮助卡片 PNG。内容全部动态收集：ROLES（含 roles.json 新增角色）、
@@ -1269,7 +1326,7 @@ def render_help_card(roles: dict, static_cmds: dict | None = None,
 
     # 违禁词管理
     ban_lines = [
-        (F_BODY, "添加违禁词 词1 词2 … ｜ 删除违禁词 词 ｜ 违禁词列表", C_INK, 0),
+        (F_BODY, "举牌添加违禁词 词1 词2 … ｜ 举牌删除违禁词 词 ｜ 举牌违禁词列表（列表发图）", C_INK, 0),
         (F_BODY, "群管理员和 bot 主人可用；命中违禁词的文字会被拒绝生成，面板设置里也可查看调整", C_MUT, 0),
     ]
     add_lines("违禁词管理", ban_lines)

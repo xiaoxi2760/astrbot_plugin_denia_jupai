@@ -26,10 +26,10 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 from .core import (JupaiError, TextTooLong, load_image, parse_color, render,
                     split_color_tail, template_default_color, render_help_card,
-                    split_banned_tokens, banned_hit)
+                    render_banned_list_card, split_banned_tokens, banned_hit)
 
 PLUGIN_NAME = "astrbot_plugin_denia_jupai"
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 
 # 角色注册表：新增角色 = 在 ROLES 加一条（或写 roles.json），并准备对应素材 + core.TEMPLATES 的 key。
 # 编号含义固定：1眨眼 2红温 3开心 4悲伤 5期待 6哭哭（动作相同，最多牌子颜色/角色不同；
@@ -80,10 +80,11 @@ STATIC_CMDS = {
 _STATIC_PATTERN = r"^(" + "|".join(re.escape(c) for c in STATIC_CMDS) + r")(?:\s+(.*))?$"
 _STATIC_RE = re.compile(_STATIC_PATTERN)
 
-# 违禁词管理：添加违禁词 / 删除违禁词 / 违禁词列表（群管理员和 bot 主人可用）
-BANNED_ADD_PATTERN = r"^添加违禁词(?:\s+(.+))?$"
-BANNED_DEL_PATTERN = r"^删除违禁词(?:\s+(.+))?$"
-BANNED_LIST_PATTERN = r"^违禁词列表$"
+# 违禁词管理：举牌添加违禁词 / 举牌删除违禁词 / 举牌违禁词列表（群管理员和 bot 主人可用）
+# 兼容旧写法：添加违禁词 / 删除违禁词 / 违禁词列表
+BANNED_ADD_PATTERN = r"^(?:举牌)?添加违禁词(?:\s+(.+))?$"
+BANNED_DEL_PATTERN = r"^(?:举牌)?删除违禁词(?:\s+(.+))?$"
+BANNED_LIST_PATTERN = r"^(?:举牌)?违禁词列表$"
 _BANNED_ADD_RE = re.compile(BANNED_ADD_PATTERN)
 _BANNED_DEL_RE = re.compile(BANNED_DEL_PATTERN)
 _BANNED_LIST_RE = re.compile(BANNED_LIST_PATTERN)
@@ -471,7 +472,7 @@ class JupaiPlugin(Star):
             return
         words = split_banned_tokens(m.group(1) or "")
         if not words:
-            yield event.plain_result("用法：添加违禁词 词1 词2 …（空格或逗号分隔，可一次多个）")
+            yield event.plain_result("用法：举牌添加违禁词 词1 词2 …（空格或逗号分隔，可一次多个）")
             event.stop_event()
             return
         added = self._save_banned_add(words)
@@ -492,7 +493,7 @@ class JupaiPlugin(Star):
             return
         words = split_banned_tokens(m.group(1) or "")
         if not words:
-            yield event.plain_result("用法：删除违禁词 词1 词2 …")
+            yield event.plain_result("用法：举牌删除违禁词 词1 词2 …")
             event.stop_event()
             return
         removed = self._save_banned_del(words)
@@ -515,11 +516,13 @@ class JupaiPlugin(Star):
             event.stop_event()
             return
         words = self._load_banned()
-        if not words:
-            yield event.plain_result("违禁词列表是空的（添加：添加违禁词 词1 词2 …）")
-            event.stop_event()
-            return
-        yield event.plain_result(f"当前违禁词 {len(words)} 个：\n" + "、".join(words))
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(
+            None, render_banned_list_card, words)
+        self._cleanup_cache()
+        out = self._get_cache_dir() / f"banned_{uuid.uuid4().hex}.png"
+        out.write_bytes(data)
+        yield event.image_result(str(out))
         event.stop_event()
 
     # ---------------- 帮助 ----------------
