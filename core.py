@@ -101,6 +101,9 @@ SS = 2              # 文字渲染超采样：2x 抗锯齿足够（峰值 98MB�
                     # 8x 时代西西说单次渲染 2.9GB 打爆容器，已废弃(8x 渲染 -> LANCZOS 精缩 -> 逐帧纯旋转)
                     # 大画布自动降档: 超采样像素数超 _SS_BUDGET 时按比例减小 SS(下限 2)
 _SS_BUDGET = 12_000_000   # 超采样画布像素预算(约 12MP, float32 下峰值内存 <1GB)
+FONT_WEIGHT = "Regular"   # assets/font.ttf 是方圆体 VF(Weight 默认 700=Bold),
+                          # FreeType 不设轴就是粗体;这里统一字重,None=用字体默认
+MAX_CACHED_FONTS = 12     # 字体实例 LRU 上限(每个实例常驻整套字形位图)
 MIN_SIZE = 12       # 可读下限,仍放不下则 TextTooLong
 INK_TARGET = 26     # 原程序烘焙字实测墨高(px),长文本锚定默认字号
 INK_MAX = 40        # 字数很少时允许放大的墨高上限(1~2 字放满,平滑回落)
@@ -146,7 +149,7 @@ _cache: dict = {}
 _calib_data: dict | None = None            # assets/calibration.json 解析缓存
 _xixi_calib_data: dict | None = None       # assets/xixi/calibration.json 解析缓存
 _ink_ratio_value: float | None = None      # _ink_ratio() 结果缓存
-_font_cache: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
+_font_cache: "OrderedDict[tuple[str, int], ImageFont.FreeTypeFont]" = OrderedDict()
 _merged_cache: OrderedDict[str, tuple] = OrderedDict()      # key -> (merged_frames, durs, rects)
 _mask_cache: OrderedDict[str, list] = OrderedDict()         # key -> [面板遮罩 L 图 × 帧数]
 _xixi_frame_cache: OrderedDict[str, tuple] = OrderedDict()  # xixi key -> (frames, durs)
@@ -155,11 +158,35 @@ _template_srcpal_cache: dict[str, bytes] = {}               # spec key -> 源 GI
 _blank_palette_cache: dict[str, bytes] = {}                 # key -> 246 色空白数据调色板
 
 
+def _new_font(size: int, path: Path = FONT_PATH) -> ImageFont.FreeTypeFont:
+    """新建 truetype 并套用 FONT_WEIGHT 字重(可变字体才有意义,静态字体原样返回)。
+
+    assets/font.ttf 是阿里妈妈方圆体 VF,Weight 轴 default=700(Bold);
+    FreeType 不主动设轴就用默认实例 -> 满屏粗体、笔画糊成一团。
+    这里统一压到 FONT_WEIGHT,保证 _fit/_fit_range 的量宽与 _text_layer 的
+    实际绘制是同一字重(否则量宽按 700、绘制按 Regular,会溢出)。
+    """
+    f = ImageFont.truetype(str(path), size)
+    if FONT_WEIGHT:
+        try:
+            f.set_variation_by_name(FONT_WEIGHT)
+        except Exception:      # 非可变字体/无此实例:用字体自带字重
+            pass
+    return f
+
+
 def _get_font(size: int, path: Path = FONT_PATH) -> ImageFont.FreeTypeFont:
-    """按 (字体路径, 字号) 缓存 truetype 字体,避免重复加载/解析。"""
+    """按 (字体路径, 字号) 缓存 truetype 字体,避免重复加载/解析。
+
+    LRU 上限 MAX_CACHED_FONTS:PIL 为每个字号实例缓存整套字形位图,
+    超采样还会再放大一倍的字号,无上限会持续涨内存。"""
     key = (str(path), size)
-    if key not in _font_cache:
-        _font_cache[key] = ImageFont.truetype(str(path), size)
+    if key in _font_cache:
+        _font_cache.move_to_end(key)
+        return _font_cache[key]
+    _font_cache[key] = _new_font(size, path)
+    while len(_font_cache) > MAX_CACHED_FONTS:
+        _font_cache.popitem(last=False)
     return _font_cache[key]
 
 
@@ -671,12 +698,13 @@ def _fit_range(text: str, iw: int, ih: int, font_path: Path,
 
     探测字体用临时 truetype 实例（不进 _font_cache）：PIL 给每个字号实例缓存
     整套字形位图（大字号几十 MB），逐号探测且入全局缓存会把内存撑到数百 MB。
+    临时实例同样过 _new_font，保证量宽字重与实际绘制一致。
     """
     probe = ImageDraw.Draw(Image.new("L", (1, 1)))
     min_i = max(int(min_size), 1)
     size = int(max_size)
     while size >= min_i:
-        font_try = ImageFont.truetype(str(font_path), size)
+        font_try = _new_font(size, font_path)
         lines = _wrap(text, font_try, iw)
         lh = int(size * LINE_H)
         if (lines and lh * len(lines) <= ih
@@ -684,7 +712,7 @@ def _fit_range(text: str, iw: int, ih: int, font_path: Path,
             return _get_font(size, font_path), lines, lh
         size = size * 88 // 100          # 几何步进：208->min 约 12 次探测
     size = min_i
-    font_try = ImageFont.truetype(str(font_path), size)
+    font_try = _new_font(size, font_path)
     lines = _wrap(text, font_try, iw)
     lh = int(size * LINE_H)
     if not lines or lh * len(lines) > ih:
@@ -792,6 +820,7 @@ def _text_layer(text: str, w: int, h: int, rgb,
     emoji_layer = Image.new("RGBA", (mw, mh), (0, 0, 0, 0))
     px_ss = max(4, round(font.size * ss * EMOJI_H))
 
+    has_emoji = False
     for k, toks in enumerate(lines):
         # 相邻文本 token 合并成段;同一段共用基线笔位(anchor="ls")保证行内自然排版
         runs: list[tuple[str, str]] = []
@@ -815,12 +844,30 @@ def _text_layer(text: str, w: int, h: int, rgb,
             bm = _emoji_bitmap(vv, px_ss) if kk == "e" else None
             if bm is not None:
                 emoji_layer.alpha_composite(bm, (round(x), round(ymid - bm.height / 2)))
+                has_emoji = True
             elif stroke_width > 0:
                 md.text((x, y_base), vv, font=fss, fill=255, anchor="ls",
                         stroke_width=max(1, round(stroke_width * SS)), stroke_fill=255)
             else:
                 md.text((x, y_base), vv, font=fss, fill=255, anchor="ls")
             x += tw
+
+    # 无 emoji(纯文字,绝大多数):走 uint8 快路。下面的通用路径要把整块
+    # 画布转 float32 RGBA 再合成,1960x480 时光临时数组就 ~50MB;
+    # 纯文字只需 蒙版 -> 缩放 -> 填字色,内存降一个量级。
+    if not has_emoji:
+        m = np.asarray(mask)
+        if not m.any():
+            return Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        ys_, xs_ = np.where(m > 4)
+        dx = int(round(mw / 2 - (xs_.min() + xs_.max() + 1) / 2))
+        dy = int(round(mh / 2 - (ys_.min() + ys_.max() + 1) / 2))
+        if dx or dy:
+            m = _shift(m, dx, dy)
+        alpha_img = Image.fromarray(m, "L").resize((w, h), Image.Resampling.LANCZOS)
+        out = Image.new("RGBA", (w, h), (int(rgb[0]), int(rgb[1]), int(rgb[2]), 0))
+        out.putalpha(alpha_img)
+        return out
 
     a_text = np.asarray(mask).astype(np.float32) / 255.0
     e_full = np.asarray(emoji_layer).astype(np.float32)
@@ -1189,7 +1236,7 @@ def _help_font(size: int, font_path: Path | None = None) -> "ImageFont.FreeTypeF
     """帮助卡片用字体（独立缓存；默认插件字体）。"""
     key = (str(font_path), size)
     if key not in _HELP_FONTS:
-        _HELP_FONTS[key] = ImageFont.truetype(str(font_path or FONT_PATH), size)
+        _HELP_FONTS[key] = _new_font(size, font_path or FONT_PATH)
     return _HELP_FONTS[key]
 
 
