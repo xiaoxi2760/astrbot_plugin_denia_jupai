@@ -104,6 +104,8 @@ _SS_BUDGET = 12_000_000   # 超采样画布像素预算(约 12MP, float32 下峰
 FONT_WEIGHT = "Regular"   # assets/font.ttf 是方圆体 VF(Weight 默认 700=Bold),
                           # FreeType 不设轴就是粗体;这里统一字重,None=用字体默认
 MAX_CACHED_FONTS = 12     # 字体实例 LRU 上限(每个实例常驻整套字形位图)
+STATIC_INK_MAX = 0.92    # 静态模板短文(1~2字)目标墨高 = 文字区高 × 此值
+STATIC_INK_MIN = 0.62    # 静态模板长文(≥10字)回落墨高 = 文字区高 × 此值
 MIN_SIZE = 12       # 可读下限,仍放不下则 TextTooLong
 INK_TARGET = 26     # 原程序烘焙字实测墨高(px),长文本锚定默认字号
 INK_MAX = 40        # 字数很少时允许放大的墨高上限(1~2 字放满,平滑回落)
@@ -1088,12 +1090,29 @@ def _encode_template(frames: list[Image.Image], durs: list[int], key: str, rgb) 
     return buf.getvalue()
 
 
+def _static_ink_target(text: str, ih: int) -> float:
+    """静态模板的目标墨高(px):字少时按气泡高度放大占满,字多平滑回落到 ih 的 ~62%。
+
+    主流程的 INK_TARGET/INK_MAX 是给 300x300 小牌面定标的(26~40px),
+    直接套到 980x240 这类大气泡会显得过小,故这里改成按文字区高度取比例。
+    """
+    n = sum(1.0 if ord(ch) > 0x2E7F else 0.5 for ch in text)   # 宽字符 1,窄字符 0.5
+    t = min(1.0, max(0.0, (n - 2.0) / 8.0))                    # 1~2字满格, ≥10字回落
+    lo = ih * STATIC_INK_MIN                                   # 长文基准墨高
+    hi = ih * STATIC_INK_MAX                                   # 短文放满墨高
+    return hi + (lo - hi) * t
+
+
 def _render_template_static(key: str, text: str, rgb) -> bytes:
     """规格模板(mode=static):静态单图贴字,输出 PNG。
 
     meta 字段:text_size [w,h] 文字画布;pos [x,y] 贴图中心;angle 倾角(度,
     同符号约定:layer.rotate(-angle));stroke_width 描边宽(0=无);
     default_text / min_font_size / max_font_size 同其他模式。
+
+    字号先按 _static_ink_target(字数) 给起点,再受 text_size 几何上限和
+    meta 的 min/max_font_size 夹逼:字少时放大占满气泡,字多时自动回落,
+    不会像纯几何适配那样"1 个字只占文字区 2%"。
     """
     text = (text or "").strip()
     if not text:
@@ -1104,8 +1123,10 @@ def _render_template_static(key: str, text: str, rgb) -> bytes:
     tw, th = (spec.get("text_size") or [200, 40])[:2]
     iw, ih = max(1, round(float(tw))), max(1, round(float(th)))
     font_path = _template_font_path(key)
+    ink = _static_ink_target(text, ih)
+    start = max(MIN_SIZE, int(round(ink / max(_ink_ratio(), 0.01))))
     font, lines, lh = _fit_range(text, iw, ih, font_path,
-                                 spec.get("max_font_size", 80.0),
+                                 float(start),
                                  spec.get("min_font_size", 5.0))
     layer = _text_layer(text, iw, ih, rgb, font=font, lines=lines, lh=lh,
                         font_path=font_path, stroke_width=int(spec.get("stroke_width", 0)))
