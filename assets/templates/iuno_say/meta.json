@@ -16,5 +16,6 @@
  "default_text": "月亮游离世间",
  "default_color": "#000000",
  "stroke_width": 0,
- "font": null
+ "font": null,
+ "font_weight": "Regular"
 }

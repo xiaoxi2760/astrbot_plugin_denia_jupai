@@ -16,5 +16,6 @@
  "default_text": "再发找人弄你",
  "default_color": "#000000",
  "stroke_width": 2,
- "font": "xixi_font.ttf"
+ "font": "xixi_font.ttf",
+ "font_weight": "Regular"
 }

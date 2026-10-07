@@ -101,8 +101,8 @@ SS = 2              # 文字渲染超采样：2x 抗锯齿足够（峰值 98MB�
                     # 8x 时代西西说单次渲染 2.9GB 打爆容器，已废弃(8x 渲染 -> LANCZOS 精缩 -> 逐帧纯旋转)
                     # 大画布自动降档: 超采样像素数超 _SS_BUDGET 时按比例减小 SS(下限 2)
 _SS_BUDGET = 12_000_000   # 超采样画布像素预算(约 12MP, float32 下峰值内存 <1GB)
-FONT_WEIGHT = "Regular"   # assets/font.ttf 是方圆体 VF(Weight 默认 700=Bold),
-                          # FreeType 不设轴就是粗体;这里统一字重,None=用字体默认
+FONT_WEIGHT = None        # 全局默认字重：None=用字体自带(方圆体 VF 默认 700=Bold,保持原观感)
+                          # 单模板可用 meta.font_weight 覆盖(如西西说/尤诺说设 "Regular")
 MAX_CACHED_FONTS = 12     # 字体实例 LRU 上限(每个实例常驻整套字形位图)
 STATIC_INK_MAX = 0.92    # 静态模板短文(1~2字)目标墨高 = 文字区高 × 此值
 STATIC_INK_MIN = 0.62    # 静态模板长文(≥10字)回落墨高 = 文字区高 × 此值
@@ -150,8 +150,8 @@ _cache: dict = {}
 # ---------------- 进程内缓存(懒加载;LRU 控制内存) ----------------
 _calib_data: dict | None = None            # assets/calibration.json 解析缓存
 _xixi_calib_data: dict | None = None       # assets/xixi/calibration.json 解析缓存
-_ink_ratio_value: float | None = None      # _ink_ratio() 结果缓存
-_font_cache: "OrderedDict[tuple[str, int], ImageFont.FreeTypeFont]" = OrderedDict()
+_ink_ratio_cache: dict[str, float] = {}    # 字重 -> 墨高/em
+_font_cache: "OrderedDict[tuple[str, int, str | None], ImageFont.FreeTypeFont]" = OrderedDict()
 _merged_cache: OrderedDict[str, tuple] = OrderedDict()      # key -> (merged_frames, durs, rects)
 _mask_cache: OrderedDict[str, list] = OrderedDict()         # key -> [面板遮罩 L 图 × 帧数]
 _xixi_frame_cache: OrderedDict[str, tuple] = OrderedDict()  # xixi key -> (frames, durs)
@@ -160,33 +160,37 @@ _template_srcpal_cache: dict[str, bytes] = {}               # spec key -> 源 GI
 _blank_palette_cache: dict[str, bytes] = {}                 # key -> 246 色空白数据调色板
 
 
-def _new_font(size: int, path: Path = FONT_PATH) -> ImageFont.FreeTypeFont:
-    """新建 truetype 并套用 FONT_WEIGHT 字重(可变字体才有意义,静态字体原样返回)。
+def _new_font(size: int, path: Path = FONT_PATH,
+              weight: str | None = None) -> ImageFont.FreeTypeFont:
+    """新建 truetype 并套用字重(可变字体才有意义,静态字体原样返回)。
 
-    assets/font.ttf 是阿里妈妈方圆体 VF,Weight 轴 default=700(Bold);
-    FreeType 不主动设轴就用默认实例 -> 满屏粗体、笔画糊成一团。
-    这里统一压到 FONT_WEIGHT,保证 _fit/_fit_range 的量宽与 _text_layer 的
-    实际绘制是同一字重(否则量宽按 700、绘制按 Regular,会溢出)。
+    assets/font.ttf 是阿里妈妈方圆体 VF,Weight 轴 default=700(Bold),
+    FreeType 不主动设轴就用默认实例。weight 缺省用全局 FONT_WEIGHT;
+    单模板可经 meta.font_weight 覆盖(如西西说/尤诺说要 Regular 才不糊),
+    量宽(_fit_range/_fit)与绘制(_text_layer)必须走同一字重,否则会溢出。
     """
     f = ImageFont.truetype(str(path), size)
-    if FONT_WEIGHT:
+    w = FONT_WEIGHT if weight is None else weight
+    if w:
         try:
-            f.set_variation_by_name(FONT_WEIGHT)
+            f.set_variation_by_name(w)
         except Exception:      # 非可变字体/无此实例:用字体自带字重
             pass
     return f
 
 
-def _get_font(size: int, path: Path = FONT_PATH) -> ImageFont.FreeTypeFont:
-    """按 (字体路径, 字号) 缓存 truetype 字体,避免重复加载/解析。
+def _get_font(size: int, path: Path = FONT_PATH,
+              weight: str | None = None) -> ImageFont.FreeTypeFont:
+    """按 (字体路径, 字号, 字重) 缓存 truetype 字体,避免重复加载/解析。
 
     LRU 上限 MAX_CACHED_FONTS:PIL 为每个字号实例缓存整套字形位图,
     超采样还会再放大一倍的字号,无上限会持续涨内存。"""
-    key = (str(path), size)
+    key = (str(path), size,
+           FONT_WEIGHT if weight is None else weight)
     if key in _font_cache:
         _font_cache.move_to_end(key)
         return _font_cache[key]
-    _font_cache[key] = _new_font(size, path)
+    _font_cache[key] = _new_font(size, path, weight)
     while len(_font_cache) > MAX_CACHED_FONTS:
         _font_cache.popitem(last=False)
     return _font_cache[key]
@@ -425,16 +429,23 @@ def _tok_width(tok: tuple[str, str], font, probe) -> float:
     return font.size * EMOJI_H * (w0 / h0)
 
 
-def _ink_ratio() -> float:
-    """方圆体 CJK 墨高/em(实测,用于墨高锚定字号);结果缓存。"""
-    global _ink_ratio_value
-    if _ink_ratio_value is None:
+_ink_ratio_cache: dict[str, float] = {}
+
+
+def _ink_ratio(weight: str | None = None) -> float:
+    """方圆体 CJK 墨高/em(实测,用于墨高锚定字号);按字重分别缓存。
+
+    字重不同墨高不同(粗体笔画外扩),故按 weight 分别测量,否则用错字重的
+    比例换算字号会偏。"""
+    w = FONT_WEIGHT if weight is None else weight
+    key = w or ""
+    if key not in _ink_ratio_cache:
         probe = Image.new("L", (300, 300), 0)
         ImageDraw.Draw(probe).text(
-            (150, 150), "我", font=_get_font(200, FONT_PATH), fill=255, anchor="mm")
+            (150, 150), "我", font=_get_font(200, FONT_PATH, weight), fill=255, anchor="mm")
         ys, _ = np.where(np.asarray(probe) > 0)
-        _ink_ratio_value = (ys.max() - ys.min() + 1) / 200.0
-    return _ink_ratio_value
+        _ink_ratio_cache[key] = (ys.max() - ys.min() + 1) / 200.0
+    return _ink_ratio_cache[key]
 
 
 def _calib() -> dict:
@@ -694,32 +705,33 @@ def _fit(text: str, iw: int, ih: int, font_path: Path = FONT_PATH):
 
 
 def _fit_range(text: str, iw: int, ih: int, font_path: Path,
-               max_size: float, min_size: float):
+               max_size: float, min_size: float,
+               weight: str | None = None):
     """字号搜索（举牌 _fit 同款思路的内存安全版）：从 max_size 按几何步进往下
     找能放进文字区的最大字号，到 min_size 仍放不下抛 TextTooLong。
 
     探测字体用临时 truetype 实例（不进 _font_cache）：PIL 给每个字号实例缓存
     整套字形位图（大字号几十 MB），逐号探测且入全局缓存会把内存撑到数百 MB。
-    临时实例同样过 _new_font，保证量宽字重与实际绘制一致。
+    临时实例同样过 _new_font(weight)，保证量宽字重与实际绘制一致。
     """
     probe = ImageDraw.Draw(Image.new("L", (1, 1)))
     min_i = max(int(min_size), 1)
     size = int(max_size)
     while size >= min_i:
-        font_try = _new_font(size, font_path)
+        font_try = _new_font(size, font_path, weight)
         lines = _wrap(text, font_try, iw)
         lh = int(size * LINE_H)
         if (lines and lh * len(lines) <= ih
                 and max(sum(_tok_width(t, font_try, probe) for t in l) for l in lines) <= iw):
-            return _get_font(size, font_path), lines, lh
+            return _get_font(size, font_path, weight), lines, lh
         size = size * 88 // 100          # 几何步进：208->min 约 12 次探测
     size = min_i
-    font_try = _new_font(size, font_path)
+    font_try = _new_font(size, font_path, weight)
     lines = _wrap(text, font_try, iw)
     lh = int(size * LINE_H)
     if not lines or lh * len(lines) > ih:
         raise TextTooLong(f"文字太长啦，牌子上写不下：{text!r}")
-    return _get_font(size, font_path), lines, lh
+    return _get_font(size, font_path, weight), lines, lh
 
 
 def _bottom_angle(rect) -> float:
@@ -797,7 +809,8 @@ def _shift(arr: np.ndarray, dx: int, dy: int) -> np.ndarray:
 def _text_layer(text: str, w: int, h: int, rgb,
                 font=None, lines=None, lh=None,
                 font_path: Path = FONT_PATH,
-                stroke_width: int = 0) -> Image.Image:
+                stroke_width: int = 0,
+                weight: str | None = None) -> Image.Image:
     """文字层:文字走单色蒙版、emoji 走彩色位图,混排后整块墨迹居中,
     预乘alpha 精缩到 (w,h) 的 RGBA(防旋转色渗)。
 
@@ -811,7 +824,7 @@ def _text_layer(text: str, w: int, h: int, rgb,
     while ss > 2 and w * h * ss * ss > _SS_BUDGET:
         ss -= 1
     mw, mh = w * ss, h * ss
-    fss = _get_font(font.size * ss, font_path)
+    fss = _get_font(font.size * ss, font_path, weight)
     probe = ImageDraw.Draw(Image.new("L", (1, 1)))
     ascent, descent = fss.getmetrics()
     lhss = int(font.size * ss * LINE_H)
@@ -1123,13 +1136,16 @@ def _render_template_static(key: str, text: str, rgb) -> bytes:
     tw, th = (spec.get("text_size") or [200, 40])[:2]
     iw, ih = max(1, round(float(tw))), max(1, round(float(th)))
     font_path = _template_font_path(key)
+    weight = spec.get("font_weight")          # meta 可覆盖字重;缺省走全局 FONT_WEIGHT
     ink = _static_ink_target(text, ih)
-    start = max(MIN_SIZE, int(round(ink / max(_ink_ratio(), 0.01))))
+    start = max(MIN_SIZE, int(round(ink / max(_ink_ratio(weight), 0.01))))
     font, lines, lh = _fit_range(text, iw, ih, font_path,
                                  float(start),
-                                 spec.get("min_font_size", 5.0))
+                                 spec.get("min_font_size", 5.0),
+                                 weight)
     layer = _text_layer(text, iw, ih, rgb, font=font, lines=lines, lh=lh,
-                        font_path=font_path, stroke_width=int(spec.get("stroke_width", 0)))
+                        font_path=font_path, stroke_width=int(spec.get("stroke_width", 0)),
+                        weight=weight)
     ang = float(spec.get("angle", 0.0))
     rot = layer.rotate(-ang, expand=True, resample=Image.Resampling.BICUBIC) if ang else layer
     frames, _ = _template_frames(key)
